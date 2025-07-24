@@ -7,4 +7,7 @@ services:
     dockerfilePath: Dockerfile
     envVars:
       - key: BOT_TOKEN
-        sync: false  # set via Render dashboard manually
+        sync: false
+      - key: MONGO_URI
+        sync: false
+        
