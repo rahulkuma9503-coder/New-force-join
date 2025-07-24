@@ -65,19 +65,49 @@ async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextT
         del context.chat_data['user_warnings'][user_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Create inline keyboard with add buttons
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "➕ Add to Group", 
+                url=f"https://t.me/{context.bot.username}?startgroup=true"
+            ),
+            InlineKeyboardButton(
+                "➕ Add to Channel", 
+                url=f"https://t.me/{context.bot.username}?startchannel=true"
+            )
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    welcome_text = (
+        "👋 *Welcome to Force Subscription Bot!*\n\n"
+        "I help group admins enforce channel subscriptions by muting users who haven't joined required channels.\n\n"
+        "✨ *Features:*\n"
+        "• Auto-mute non-subscribed users\n"
+        "• 5-minute mute duration\n"
+        "• Self-unmute after joining\n"
+        "• Supports both public & private channels\n\n"
+        "📌 *How to setup:*\n"
+        "1. Add me to your group as admin\n"
+        "2. Use `/fsub @channel` to set requirements\n"
+        "3. I'll handle the rest!\n\n"
+        "Click the buttons below to add me to your groups/channels:"
+    )
+
     if update.effective_chat.type == 'private':
         await update.message.reply_text(
-            "Hi! I'm a forced subscription bot. Add me to a group and use /fsub to set a channel.\n\n"
-            "⚠️ Requirements:\n"
-            "- Make me admin in both group and channel\n"
-            "- Grant me 'Restrict users' permission"
+            welcome_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
             "I'm a forced subscription bot. Use /fsub to set a required channel for this group.\n\n"
-            "ℹ️ I need to be admin in both this group and the channel to work properly."
+            "ℹ️ I need to be admin in both this group and the channel to work properly.",
+            reply_markup=reply_markup
         )
-
+        
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚠️ Admin Requirements:\n"
