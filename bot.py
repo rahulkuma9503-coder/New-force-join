@@ -4,13 +4,14 @@ import time
 from threading import Thread
 from flask import Flask
 from pymongo import MongoClient
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
     MessageHandler,
-    filters
+    filters,
+    CallbackQueryHandler
 )
 
 # Load environment variables
@@ -201,16 +202,16 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat_member.status in ['left', 'kicked']:
             # Mute the user for 5 minutes (300 seconds)
             permissions = ChatPermissions(
-                can_send_messages=False,       # No text messages
-                can_send_audios=False,         # No audio files
-                can_send_documents=False,      # No documents
-                can_send_photos=False,         # No photos
-                can_send_videos=False,         # No videos
-                can_send_video_notes=False,    # No video notes
-                can_send_voice_notes=False,    # No voice notes
-                can_send_polls=False,          # No polls
-                can_send_other_messages=False, # No stickers, GIFs, etc
-                can_add_web_page_previews=False # No link previews
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
             )
             
             try:
@@ -224,11 +225,34 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     until_date=until_date
                 )
                 
-                channel_display = f"@{channel}" if channel and not channel.startswith('-') else "the required channel"
+                # Create inline keyboard with unmute button and channel link
+                keyboard = []
+                
+                # Add Unmute button
+                keyboard.append([
+                    InlineKeyboardButton(
+                        "✅ Unmute Me", 
+                        callback_data=f"unmute:{chat.id}:{user.id}"
+                    )
+                ])
+                
+                # Add Channel Join button if username is available
+                if channel and not channel.startswith('-'):
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            "🔗 Join Channel", 
+                            url=f"https://t.me/{channel}"
+                        )
+                    ])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send message with buttons
                 await update.message.reply_text(
-                    f"⚠️ {user.mention_html()} has been muted for 5 minutes for not joining {channel_display}.\n"
-                    "Join the channel to avoid being muted again.",
-                    parse_mode='HTML'
+                    f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
+                    f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
                 )
             except Exception as mute_error:
                 logger.error(f"Error muting user: {mute_error}")
@@ -242,6 +266,61 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     except Exception as e:
         logger.error(f"Error in membership check: {e}")
+
+async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Parse callback data: format "unmute:{chat_id}:{user_id}"
+    data = query.data.split(':')
+    if len(data) != 3 or data[0] != 'unmute':
+        await query.edit_message_text("⚠️ Invalid request. Please try again later.")
+        return
+    
+    chat_id = int(data[1])
+    user_id = int(data[2])
+    
+    # Verify the user clicking is the muted user
+    if query.from_user.id != user_id:
+        await query.answer("This button is not for you!", show_alert=True)
+        return
+    
+    try:
+        # Get the chat
+        chat = await context.bot.get_chat(chat_id)
+        
+        # Restore full permissions
+        permissions = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        )
+        
+        # Unmute the user
+        await chat.restrict_member(user_id, permissions)
+        
+        # Update the message
+        await query.edit_message_text(
+            f"✅ {query.from_user.mention_html()} has been unmuted!",
+            parse_mode='HTML'
+        )
+        
+        # Notify in the group
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ {query.from_user.mention_html()} has been unmuted by request.",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Error unmuting user: {e}")
+        await query.edit_message_text("⚠️ Failed to unmute. Please contact an admin.")
 
 def main():
     # Start Flask server in a separate thread
@@ -257,6 +336,7 @@ def main():
     application.add_handler(
         MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, check_membership)
     )
+    application.add_handler(CallbackQueryHandler(unmute_button, pattern=r"^unmute:"))
     
     # Start polling
     application.run_polling()
