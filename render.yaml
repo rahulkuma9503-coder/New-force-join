@@ -1,13 +1,18 @@
 services:
   - type: web
-    name: join-forces-bot
-    env: docker
-    plan: free
-    branch: main
-    dockerfilePath: Dockerfile
+    name: telegram-fsub-bot
+    env: python
+    build:
+      dockerfilePath: ./Dockerfile
     envVars:
       - key: BOT_TOKEN
-        sync: false
+        fromService:
+          name: telegram-fsub-bot
+          type: secret
       - key: MONGO_URI
-        sync: false
-        
+        fromService:
+          name: telegram-fsub-bot
+          type: secret
+    healthCheckPath: /
+    port: 8000
+    plan: free
