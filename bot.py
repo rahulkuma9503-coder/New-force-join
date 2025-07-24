@@ -86,7 +86,7 @@ def run_bot():
     app_bot.add_handler(CommandHandler("fsub", fsub_command))
 
     # 🔥 FIXED: restrict handler only for group messages
-    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, restrict))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, restrict))
 
     logger.info("🤖 Polling...")
     app_bot.run_polling()
