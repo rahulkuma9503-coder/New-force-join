@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from threading import Thread
 from flask import Flask
 from pymongo import MongoClient
@@ -9,8 +10,7 @@ from telegram.ext import (
     ContextTypes,
     CommandHandler,
     MessageHandler,
-    filters,
-    RateLimiter
+    filters
 )
 
 # Load environment variables
@@ -183,13 +183,14 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_member = await context.bot.get_chat_member(target_chat, context.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 # Only show this error once per hour per group to avoid spamming
-                last_warning = context.chat_data.get('last_channel_warning')
-                if not last_warning or (update.message.date.timestamp() - last_warning) > 3600:
+                last_warning = context.chat_data.get('last_channel_warning', 0)
+                current_time = time.time()
+                if current_time - last_warning > 3600:
                     await update.message.reply_text(
                         "⚠️ I need admin in the channel to check memberships.\n"
                         "Please make me admin or update /fsub settings."
                     )
-                    context.chat_data['last_channel_warning'] = update.message.date.timestamp()
+                    context.chat_data['last_channel_warning'] = current_time
                 return
         except Exception as perm_error:
             logger.error(f"Permission check error: {perm_error}")
@@ -216,12 +217,13 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as mute_error:
                 logger.error(f"Error muting user: {mute_error}")
-                last_mute_error = context.chat_data.get('last_mute_error')
-                if not last_mute_error or (update.message.date.timestamp() - last_mute_error) > 3600:
+                last_mute_error = context.chat_data.get('last_mute_error', 0)
+                current_time = time.time()
+                if current_time - last_mute_error > 3600:
                     await update.message.reply_text(
                         "⚠️ Failed to mute user. Make sure I have 'Restrict users' permission in this group."
                     )
-                    context.chat_data['last_mute_error'] = update.message.date.timestamp()
+                    context.chat_data['last_mute_error'] = current_time
     
     except Exception as e:
         logger.error(f"Error in membership check: {e}")
@@ -230,13 +232,8 @@ def main():
     # Start Flask server in a separate thread
     Thread(target=run_flask, daemon=True).start()
     
-    # Create Telegram bot with rate limiting
-    application = (
-        ApplicationBuilder()
-        .token(os.getenv('BOT_TOKEN'))
-        .rate_limiter(RateLimiter(max_retries=3))
-        .build()
-    )
+    # Create Telegram bot
+    application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
