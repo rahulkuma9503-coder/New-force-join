@@ -65,49 +65,19 @@ async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextT
         del context.chat_data['user_warnings'][user_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Create inline keyboard with add buttons
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "➕ Add to Group", 
-                url=f"https://t.me/{context.bot.username}?startgroup=true"
-            ),
-            InlineKeyboardButton(
-                "➕ Add to Channel", 
-                url=f"https://t.me/{context.bot.username}?startchannel=true"
-            )
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    welcome_text = (
-        "👋 *Welcome to Force Subscription Bot!*\n\n"
-        "I help group admins enforce channel subscriptions by muting users who haven't joined required channels.\n\n"
-        "✨ *Features:*\n"
-        "• Auto-mute non-subscribed users\n"
-        "• 5-minute mute duration\n"
-        "• Self-unmute after joining\n"
-        "• Supports both public & private channels\n\n"
-        "📌 *How to setup:*\n"
-        "1. Add me to your group as admin\n"
-        "2. Use `/fsub @channel` to set requirements\n"
-        "3. I'll handle the rest!\n\n"
-        "Click the buttons below to add me to your groups/channels:"
-    )
-
     if update.effective_chat.type == 'private':
         await update.message.reply_text(
-            welcome_text,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
+            "Hi! I'm a forced subscription bot. Add me to a group and use /fsub to set a channel.\n\n"
+            "⚠️ Requirements:\n"
+            "- Make me admin in both group and channel\n"
+            "- Grant me 'Restrict users' permission"
         )
     else:
         await update.message.reply_text(
             "I'm a forced subscription bot. Use /fsub to set a required channel for this group.\n\n"
-            "ℹ️ I need to be admin in both this group and the channel to work properly.",
-            reply_markup=reply_markup
+            "ℹ️ I need to be admin in both this group and the channel to work properly."
         )
-        
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚠️ Admin Requirements:\n"
@@ -205,11 +175,15 @@ async def save_fsub_channel(chat_id: int, channel: str, update: Update, context:
         )
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Skip if message is forwarded from a channel
+    if update.message and update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
+        return
+    
     chat = update.effective_chat
     user = update.effective_user
     
-    # Skip checks in private chats, from bots, or from channels
-    if chat.type == 'private' or user.is_bot or (hasattr(update.message, 'forward_from_chat') and update.message.forward_from_chat.type == 'channel':
+    # Skip checks in private chats or from bots
+    if chat.type == 'private' or user.is_bot:
         return
     
     # Get fsub data from MongoDB
@@ -279,16 +253,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     until_date=until_date
                 )
                 
-                # Clean up previous warning if exists
-                if 'user_warnings' in context.chat_data and user.id in context.chat_data['user_warnings']:
-                    prev_msg_id = context.chat_data['user_warnings'][user.id]
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=chat.id,
-                            message_id=prev_msg_id
-                        )
-                    except Exception as delete_error:
-                        logger.warning(f"Could not delete previous warning: {delete_error}")
+                # Delete all previous warnings for this user
+                await delete_previous_warnings(chat.id, user.id, context)
                 
                 # Create inline keyboard with unmute button and channel link
                 keyboard = []
@@ -301,21 +267,56 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
                 
-                # Add Channel Join button if username is available
-                if channel and not channel.startswith('-'):
+                # Try to get or create invite link for private channels
+                invite_link = None
+                try:
+                    if channel_id and (not channel or channel.startswith('-')):
+                        # For private channels (ID only or ID with negative number)
+                        chat_obj = await context.bot.get_chat(channel_id)
+                        if chat_obj.invite_link:
+                            invite_link = chat_obj.invite_link
+                        else:
+                            # Create new invite link if none exists
+                            invite_link_obj = await context.bot.create_chat_invite_link(
+                                chat_id=channel_id,
+                                creates_join_request=False,
+                                name="FSub Link"
+                            )
+                            invite_link = invite_link_obj.invite_link
+                except Exception as e:
+                    logger.warning(f"Could not get/create invite link for channel: {e}")
+                
+                # Add Channel Join button if link is available
+                if channel and not channel.startswith('-'):  # Public channel
                     keyboard.append([
                         InlineKeyboardButton(
                             "🔗 Join Channel", 
                             url=f"https://t.me/{channel}"
                         )
                     ])
+                elif invite_link:  # Private channel with invite link
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            "🔗 Join Private Channel", 
+                            url=invite_link
+                        )
+                    ])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Prepare channel display name
+                channel_display = ""
+                if channel and not channel.startswith('-'):
+                    channel_display = f"@{channel}"
+                elif channel_id:
+                    channel_display = "the private channel"
+                else:
+                    channel_display = "the required channel"
                 
                 # Send message with buttons
                 warning_msg = await update.message.reply_text(
                     f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
-                    f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}\n\n"
+                    f"Reason: Not joined {channel_display}\n\n"
                     "After joining, click 'Unmute Me' to verify membership.",
                     parse_mode='HTML',
                     reply_markup=reply_markup
@@ -324,7 +325,15 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Store the new warning message ID
                 if 'user_warnings' not in context.chat_data:
                     context.chat_data['user_warnings'] = {}
-                context.chat_data['user_warnings'][user.id] = warning_msg.message_id
+                
+                # Initialize as list if not already
+                if user.id not in context.chat_data['user_warnings']:
+                    context.chat_data['user_warnings'][user.id] = []
+                elif not isinstance(context.chat_data['user_warnings'][user.id], list):
+                    context.chat_data['user_warnings'][user.id] = [context.chat_data['user_warnings'][user.id]]
+                
+                # Add new message ID
+                context.chat_data['user_warnings'][user.id].append(warning_msg.message_id)
                 
             except Exception as mute_error:
                 logger.error(f"Error muting user: {mute_error}")
