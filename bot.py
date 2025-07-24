@@ -62,7 +62,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Introduction\n"
         "/help - This message\n"
         "/fsub [@channel|ID|reply] - Set required channel\n\n"
-        "I'll mute anyone who hasn't joined the required channel."
+        "I'll mute anyone who hasn't joined the required channel for 5 minutes."
     )
 
 async def set_fsub_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -199,7 +199,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check user's membership in channel
         chat_member = await context.bot.get_chat_member(target_chat, user.id)
         if chat_member.status in ['left', 'kicked']:
-            # Mute the user with updated permissions syntax
+            # Mute the user for 5 minutes (300 seconds)
             permissions = ChatPermissions(
                 can_send_messages=False,       # No text messages
                 can_send_audios=False,         # No audio files
@@ -214,11 +214,20 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             try:
-                await chat.restrict_member(user.id, permissions)
+                # Calculate mute duration (5 minutes)
+                mute_duration = 5 * 60  # 5 minutes in seconds
+                until_date = int(time.time()) + mute_duration
+                
+                await chat.restrict_member(
+                    user.id, 
+                    permissions,
+                    until_date=until_date
+                )
+                
                 channel_display = f"@{channel}" if channel and not channel.startswith('-') else "the required channel"
                 await update.message.reply_text(
-                    f"⚠️ {user.mention_html()} has been muted for not joining {channel_display}.\n"
-                    "Join the channel and contact an admin to be unmuted.",
+                    f"⚠️ {user.mention_html()} has been muted for 5 minutes for not joining {channel_display}.\n"
+                    "Join the channel to avoid being muted again.",
                     parse_mode='HTML'
                 )
             except Exception as mute_error:
