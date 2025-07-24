@@ -199,12 +199,18 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check user's membership in channel
         chat_member = await context.bot.get_chat_member(target_chat, user.id)
         if chat_member.status in ['left', 'kicked']:
-            # Mute the user
+            # Mute the user with updated permissions syntax
             permissions = ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False
+                can_send_messages=False,       # No text messages
+                can_send_audios=False,         # No audio files
+                can_send_documents=False,      # No documents
+                can_send_photos=False,         # No photos
+                can_send_videos=False,         # No videos
+                can_send_video_notes=False,    # No video notes
+                can_send_voice_notes=False,    # No voice notes
+                can_send_polls=False,          # No polls
+                can_send_other_messages=False, # No stickers, GIFs, etc
+                can_add_web_page_previews=False # No link previews
             )
             
             try:
