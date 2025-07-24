@@ -80,12 +80,17 @@ async def restrict(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_bot():
     logger.info("🟢 Starting Telegram bot...")
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("help", help_command))
     app_bot.add_handler(CommandHandler("fsub", fsub_command))
-    app_bot.add_handler(MessageHandler(filters.TEXT & (filters.Group | filters.Private), restrict))
+
+    # 🔥 FIXED: restrict handler only for group messages
+    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, restrict))
+
     logger.info("🤖 Polling...")
     app_bot.run_polling()
+    
 
 def run_web():
     app.run(host="0.0.0.0", port=8000)
