@@ -250,7 +250,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Send message with buttons
                 await update.message.reply_text(
                     f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
-                    f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}",
+                    f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}\n\n"
+                    "After joining, click 'Unmute Me' to verify membership.",
                     parse_mode='HTML',
                     reply_markup=reply_markup
                 )
@@ -282,10 +283,43 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Verify the user clicking is the muted user
     if query.from_user.id != user_id:
-        await query.answer("This button is not for you!", show_alert=True)
+        await query.answer("❌ This button is only for the muted user!", show_alert=True)
         return
     
     try:
+        # Get channel information from MongoDB
+        fsub_data = fsub_collection.find_one({'chat_id': chat_id})
+        if not fsub_data:
+            await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
+            return
+        
+        channel = fsub_data.get('channel')
+        channel_id = fsub_data.get('channel_id')
+        
+        # Determine channel identifier to use
+        target_chat = channel_id if channel_id else (f"@{channel}" if channel and not channel.startswith('-') else channel)
+        
+        if not target_chat:
+            await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
+            return
+        
+        # Verify user has joined the channel
+        try:
+            chat_member = await context.bot.get_chat_member(target_chat, user_id)
+            if chat_member.status in ['left', 'kicked']:
+                await query.answer(
+                    "❌ You haven't joined the channel yet! Please join first.",
+                    show_alert=True
+                )
+                return
+        except Exception as e:
+            logger.error(f"Error verifying membership: {e}")
+            await query.answer(
+                "⚠️ Error verifying membership. Please try again later.",
+                show_alert=True
+            )
+            return
+        
         # Get the chat
         chat = await context.bot.get_chat(chat_id)
         
@@ -315,12 +349,15 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Notify in the group
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ {query.from_user.mention_html()} has been unmuted by request.",
+            text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
             parse_mode='HTML'
         )
     except Exception as e:
         logger.error(f"Error unmuting user: {e}")
-        await query.edit_message_text("⚠️ Failed to unmute. Please contact an admin.")
+        await query.answer(
+            "⚠️ Failed to unmute. Please contact an admin.",
+            show_alert=True
+        )
 
 def main():
     # Start Flask server in a separate thread
