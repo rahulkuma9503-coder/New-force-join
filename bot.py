@@ -40,6 +40,30 @@ def health_check():
 def run_flask():
     app.run(host='0.0.0.0', port=8000)
 
+async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Delete all previous warning messages for a user"""
+    if 'user_warnings' not in context.chat_data:
+        return
+    
+    # Get all message IDs for this user
+    msg_ids = context.chat_data['user_warnings'].get(user_id, [])
+    if not isinstance(msg_ids, list):
+        msg_ids = [msg_ids]
+    
+    # Delete each message
+    for msg_id in msg_ids:
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=msg_id
+            )
+        except Exception as e:
+            logger.warning(f"Could not delete message {msg_id}: {e}")
+    
+    # Clear stored message IDs
+    if user_id in context.chat_data['user_warnings']:
+        del context.chat_data['user_warnings'][user_id]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         await update.message.reply_text(
@@ -225,16 +249,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     until_date=until_date
                 )
                 
-                # Clean up previous warning if exists
-                if 'user_warnings' in context.chat_data and user.id in context.chat_data['user_warnings']:
-                    prev_msg_id = context.chat_data['user_warnings'][user.id]
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=chat.id,
-                            message_id=prev_msg_id
-                        )
-                    except Exception as delete_error:
-                        logger.warning(f"Could not delete previous warning: {delete_error}")
+                # Delete all previous warnings for this user
+                await delete_previous_warnings(chat.id, user.id, context)
                 
                 # Create inline keyboard with unmute button and channel link
                 keyboard = []
@@ -305,7 +321,15 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Store the new warning message ID
                 if 'user_warnings' not in context.chat_data:
                     context.chat_data['user_warnings'] = {}
-                context.chat_data['user_warnings'][user.id] = warning_msg.message_id
+                
+                # Initialize as list if not already
+                if user.id not in context.chat_data['user_warnings']:
+                    context.chat_data['user_warnings'][user.id] = []
+                elif not isinstance(context.chat_data['user_warnings'][user.id], list):
+                    context.chat_data['user_warnings'][user.id] = [context.chat_data['user_warnings'][user.id]]
+                
+                # Add new message ID
+                context.chat_data['user_warnings'][user.id].append(warning_msg.message_id)
                 
             except Exception as mute_error:
                 logger.error(f"Error muting user: {mute_error}")
@@ -392,11 +416,10 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Unmute the user
         await chat.restrict_member(user_id, permissions)
         
-        # Remove warning message from chat_data
-        if 'user_warnings' in context.chat_data and user_id in context.chat_data['user_warnings']:
-            del context.chat_data['user_warnings'][user_id]
+        # Delete all warning messages for this user
+        await delete_previous_warnings(chat_id, user_id, context)
         
-        # Update the message
+        # Update the callback message
         await query.edit_message_text(
             f"✅ {query.from_user.mention_html()} has been unmuted!",
             parse_mode='HTML'
