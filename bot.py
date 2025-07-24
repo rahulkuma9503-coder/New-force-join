@@ -247,21 +247,56 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
                 
-                # Add Channel Join button if username is available
-                if channel and not channel.startswith('-'):
+                # Try to get or create invite link for private channels
+                invite_link = None
+                try:
+                    if channel_id and (not channel or channel.startswith('-')):
+                        # For private channels (ID only or ID with negative number)
+                        chat_obj = await context.bot.get_chat(channel_id)
+                        if chat_obj.invite_link:
+                            invite_link = chat_obj.invite_link
+                        else:
+                            # Create new invite link if none exists
+                            invite_link_obj = await context.bot.create_chat_invite_link(
+                                chat_id=channel_id,
+                                creates_join_request=False,
+                                name="FSub Link"
+                            )
+                            invite_link = invite_link_obj.invite_link
+                except Exception as e:
+                    logger.warning(f"Could not get/create invite link for channel: {e}")
+                
+                # Add Channel Join button if link is available
+                if channel and not channel.startswith('-'):  # Public channel
                     keyboard.append([
                         InlineKeyboardButton(
                             "🔗 Join Channel", 
                             url=f"https://t.me/{channel}"
                         )
                     ])
+                elif invite_link:  # Private channel with invite link
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            "🔗 Join Private Channel", 
+                            url=invite_link
+                        )
+                    ])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Prepare channel display name
+                channel_display = ""
+                if channel and not channel.startswith('-'):
+                    channel_display = f"@{channel}"
+                elif channel_id:
+                    channel_display = "the private channel"
+                else:
+                    channel_display = "the required channel"
                 
                 # Send message with buttons
                 warning_msg = await update.message.reply_text(
                     f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
-                    f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}\n\n"
+                    f"Reason: Not joined {channel_display}\n\n"
                     "After joining, click 'Unmute Me' to verify membership.",
                     parse_mode='HTML',
                     reply_markup=reply_markup
