@@ -225,6 +225,17 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     until_date=until_date
                 )
                 
+                # Clean up previous warning if exists
+                if 'user_warnings' in context.chat_data and user.id in context.chat_data['user_warnings']:
+                    prev_msg_id = context.chat_data['user_warnings'][user.id]
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=chat.id,
+                            message_id=prev_msg_id
+                        )
+                    except Exception as delete_error:
+                        logger.warning(f"Could not delete previous warning: {delete_error}")
+                
                 # Create inline keyboard with unmute button and channel link
                 keyboard = []
                 
@@ -248,13 +259,19 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
                 # Send message with buttons
-                await update.message.reply_text(
+                warning_msg = await update.message.reply_text(
                     f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
                     f"Reason: Not joined {f'@{channel}' if channel and not channel.startswith('-') else 'the required channel'}\n\n"
                     "After joining, click 'Unmute Me' to verify membership.",
                     parse_mode='HTML',
                     reply_markup=reply_markup
                 )
+                
+                # Store the new warning message ID
+                if 'user_warnings' not in context.chat_data:
+                    context.chat_data['user_warnings'] = {}
+                context.chat_data['user_warnings'][user.id] = warning_msg.message_id
+                
             except Exception as mute_error:
                 logger.error(f"Error muting user: {mute_error}")
                 last_mute_error = context.chat_data.get('last_mute_error', 0)
@@ -339,6 +356,10 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Unmute the user
         await chat.restrict_member(user_id, permissions)
+        
+        # Remove warning message from chat_data
+        if 'user_warnings' in context.chat_data and user_id in context.chat_data['user_warnings']:
+            del context.chat_data['user_warnings'][user_id]
         
         # Update the message
         await query.edit_message_text(
