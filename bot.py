@@ -1,101 +1,158 @@
-import os, logging
-from flask import Flask
+import os
+import logging
 from threading import Thread
-from dotenv import load_dotenv
-from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from pymongo import MongoClient, errors
+from flask import Flask, request
+from pymongo import MongoClient
+from telegram import Update, ChatPermissions
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 
-# Enable logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+# Set up logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-
 # MongoDB setup
-try:
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    client.server_info()  # force connect
-    db = client["telegram_bot"]
-    fsub = db["fsub_settings"]
-    logger.info("✅ Connected to MongoDB")
-except errors.ServerSelectionTimeoutError as e:
-    logger.error("❌ MongoDB connection failed", exc_info=e)
-    fsub = None
+mongo_client = MongoClient(os.getenv('MONGO_URI'))
+db = mongo_client.telegram_bot
+fsub_collection = db.fsub_channels
 
-# Flask
+# Flask app for health checks
 app = Flask(__name__)
-@app.route('/')
-def index():
-    return "🚀 Bot is running with logging"
 
-# Command handlers with logging
+@app.route('/')
+def health_check():
+    return "Bot is running", 200
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
+
+# Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received /start from {update.effective_user.id}")
-    await update.message.reply_text("👋 Bot is live! Use /help")
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text(
+            "Hi! I'm a forced subscription bot. Add me to a group and use /fsub to set a channel."
+        )
+    else:
+        await update.message.reply_text(
+            "I'm a forced subscription bot. Use /fsub to set a required channel for this group."
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received /help from {update.effective_user.id}")
-    await update.message.reply_text("📌 Commands: /start, /help, /fsub @channel")
+    await update.message.reply_text(
+        "Commands:\n"
+        "/start - Introduction\n"
+        "/help - This message\n"
+        "/fsub @channel - Set forced subscription channel (admins only)\n\n"
+        "I'll mute anyone who hasn't joined the required channel."
+    )
 
-async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received /fsub {context.args} from {update.effective_user.id} in chat {update.effective_chat.id}")
+async def set_fsub_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if not chat.type.endswith("group"):
-        await update.message.reply_text("⚠️ Only works in groups")
-        return
-    member = await context.bot.get_chat_member(chat.id, update.effective_user.id)
-    if member.status not in ["administrator", "creator"]:
-        await update.message.reply_text("❌ Only admins")
-        return
-    if not context.args:
-        await update.message.reply_text("❌ Usage: /fsub @channel")
-        return
-    channel = context.args[0]
-    res = fsub.update_one({"group_id": chat.id}, {"$set": {"required_channel": channel}}, upsert=True)
-    logger.info(f"Mongo update result: {res.raw_result}")
-    await update.message.reply_text(f"✅ Force-sub set to {channel}")
-
-async def restrict(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_id = update.effective_chat.id
-    logger.info(f"Message from {user.id} in group {chat_id}")
-    rec = fsub.find_one({"group_id": chat_id})
-    if not rec:
-        logger.info("No fsub record, skipping")
+    
+    # Check if command is used in a group
+    if chat.type == 'private':
+        await update.message.reply_text("This command only works in groups.")
         return
-    logger.info(f"Found record: {rec}")
+    
+    # Check if user is admin
+    member = await chat.get_member(user.id)
+    if member.status not in ['administrator', 'creator']:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+    
+    # Check if channel is mentioned
+    if not context.args or not context.args[0].startswith('@'):
+        await update.message.reply_text("Usage: /fsub @channelusername")
+        return
+    
+    channel = context.args[0].lstrip('@')
+    
+    # Save to MongoDB
+    fsub_collection.update_one(
+        {'chat_id': chat.id},
+        {'$set': {'channel': channel}},
+        upsert=True
+    )
+    
+    await update.message.reply_text(
+        f"✅ Success! All members must now join @{channel} to participate here."
+    )
+
+async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # Skip if private chat or message from bot
+    if chat.type == 'private' or user.is_bot:
+        return
+    
+    # Check if group has a forced channel
+    fsub_data = fsub_collection.find_one({'chat_id': chat.id})
+    if not fsub_data:
+        return
+    
+    channel = fsub_data['channel']
+    
     try:
-        cm = await context.bot.get_chat_member(rec["required_channel"], user.id)
-        if cm.status in ["left", "kicked"]:
-            logger.info(f"User {user.id} not in channel {rec['required_channel']} – muting")
-            await context.bot.restrict_chat_member(chat_id, user.id, ChatPermissions(can_send_messages=False))
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Join", url=f"https://t.me/{rec['required_channel'].lstrip('@')}")]])
-            await update.message.reply_text("🚫 Join the channel to chat", reply_markup=kb)
+        # Check if user is admin (admins are exempt)
+        member = await chat.get_member(user.id)
+        if member.status in ['administrator', 'creator']:
+            return
+        
+        # Check if user is in the channel
+        chat_member = await context.bot.get_chat_member(f"@{channel}", user.id)
+        if chat_member.status in ['left', 'kicked']:
+            # Mute the user
+            permissions = ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            )
+            await chat.restrict_member(user.id, permissions)
+            
+            # Send warning message
+            await update.message.reply_text(
+                f"⚠️ {user.mention_html()} has been muted because they haven't joined @{channel}.\n"
+                "Join the channel and contact an admin to be unmuted.",
+                parse_mode='HTML'
+            )
     except Exception as e:
-        logger.error("Error in restrict_user", exc_info=e)
+        logger.error(f"Error checking membership: {e}")
+        await update.message.reply_text(
+            "⚠️ Error checking channel membership. Make sure I'm admin in the channel."
+        )
 
-def run_bot():
-    logger.info("🟢 Starting Telegram bot...")
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+def main():
+    # Start Flask server in a separate thread
+    Thread(target=run_flask, daemon=True).start()
     
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("help", help_command))
-    app_bot.add_handler(CommandHandler("fsub", fsub_command))
-
-    # 🔥 FIXED: restrict handler only for group messages
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, restrict))
-
-    logger.info("🤖 Polling...")
-    app_bot.run_polling()
+    # Create Telegram bot
+    application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
     
-
-def run_web():
-    app.run(host="0.0.0.0", port=8000)
-
-if __name__ == "__main__":
-    Thread(target=run_bot).start()
-    Thread(target=run_web).start()
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("fsub", set_fsub_channel))
+    application.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, check_membership)
+    )
     
+    # Start polling
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
