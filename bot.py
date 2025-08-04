@@ -2,7 +2,7 @@ import os
 import logging
 import time
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 from pymongo import MongoClient
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 mongo_client = MongoClient(os.getenv('MONGO_URI'))
 db = mongo_client.telegram_bot
 fsub_collection = db.fsub_channels
+user_collection = db.users
 
 # Flask app for health checks
 app = Flask(__name__)
@@ -49,12 +50,10 @@ async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextT
     if 'user_warnings' not in context.chat_data:
         return
     
-    # Get all message IDs for this user
     msg_ids = context.chat_data['user_warnings'].get(user_id, [])
     if not isinstance(msg_ids, list):
         msg_ids = [msg_ids]
     
-    # Delete each message
     for msg_id in msg_ids:
         try:
             await context.bot.delete_message(
@@ -64,12 +63,23 @@ async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextT
         except Exception as e:
             logger.warning(f"Could not delete message {msg_id}: {e}")
     
-    # Clear stored message IDs
     if user_id in context.chat_data['user_warnings']:
         del context.chat_data['user_warnings'][user_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Create inline keyboard with add buttons and support channel
+    if update.effective_chat.type == 'private':
+        user = update.effective_user
+        user_collection.update_one(
+            {'user_id': user.id},
+            {'$set': {
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'username': user.username,
+                'last_interaction': datetime.now()
+            }},
+            upsert=True
+        )
+    
     keyboard = [
         [
             InlineKeyboardButton(
@@ -83,7 +93,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     
-    # Add support channel button if configured
     if os.getenv('SUPPORT_CHANNEL'):
         keyboard.append([
             InlineKeyboardButton(
@@ -123,7 +132,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Create keyboard with support channel if configured
     keyboard = []
     if os.getenv('SUPPORT_CHANNEL'):
         keyboard.append([
@@ -160,14 +168,12 @@ async def set_fsub_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Only admins can use this command.")
         return
     
-    # Check if replying to a channel message
     if update.message.reply_to_message and update.message.reply_to_message.sender_chat:
         if update.message.reply_to_message.sender_chat.type == 'channel':
             channel = update.message.reply_to_message.sender_chat.username or str(update.message.reply_to_message.sender_chat.id)
             await save_fsub_channel(chat.id, channel, update, context)
             return
     
-    # Check for channel ID or @username in arguments
     if context.args:
         channel_input = context.args[0]
         if channel_input.startswith('@'):
@@ -189,20 +195,17 @@ async def set_fsub_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def save_fsub_channel(chat_id: int, channel: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Verify the channel exists and get its ID
         chat = await context.bot.get_chat(f"@{channel}" if not channel.startswith('-') else channel)
         if chat.type != 'channel':
             await update.message.reply_text("❌ The specified chat is not a channel.")
             return
         
-        # Save to MongoDB
         fsub_collection.update_one(
             {'chat_id': chat_id},
             {'$set': {'channel': channel, 'channel_id': chat.id}},
             upsert=True
         )
         
-        # Verify bot permissions in channel
         try:
             bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
@@ -232,18 +235,15 @@ async def save_fsub_channel(chat_id: int, channel: str, update: Update, context:
         )
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Skip if message is forwarded from a channel
     if update.message and update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
         return
     
     chat = update.effective_chat
     user = update.effective_user
     
-    # Skip checks in private chats or from bots
     if chat.type == 'private' or user.is_bot:
         return
     
-    # Get fsub data from MongoDB
     fsub_data = fsub_collection.find_one({'chat_id': chat.id})
     if not fsub_data:
         return
@@ -252,23 +252,19 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = fsub_data.get('channel_id')
     
     try:
-        # Check if user is admin (exempt from checks)
         member = await chat.get_member(user.id)
         if member.status in ['administrator', 'creator']:
             return
         
-        # Determine channel identifier to use
         target_chat = channel_id if channel_id else (f"@{channel}" if channel and not channel.startswith('-') else channel)
         
         if not target_chat:
             logger.warning(f"No valid channel identifier found for chat {chat.id}")
             return
         
-        # Verify bot's permissions in target channel
         try:
             bot_member = await context.bot.get_chat_member(target_chat, context.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
-                # Only show this error once per hour per group to avoid spamming
                 last_warning = context.chat_data.get('last_channel_warning', 0)
                 current_time = time.time()
                 if current_time - last_warning > 3600:
@@ -282,10 +278,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Permission check error: {perm_error}")
             return
         
-        # Check user's membership in channel
         chat_member = await context.bot.get_chat_member(target_chat, user.id)
         if chat_member.status in ['left', 'kicked']:
-            # Mute the user for 5 minutes (300 seconds)
             permissions = ChatPermissions(
                 can_send_messages=False,
                 can_send_audios=False,
@@ -300,8 +294,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             try:
-                # Calculate mute duration (5 minutes)
-                mute_duration = 5 * 60  # 5 minutes in seconds
+                mute_duration = 5 * 60
                 until_date = int(time.time()) + mute_duration
                 
                 await chat.restrict_member(
@@ -310,13 +303,10 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     until_date=until_date
                 )
                 
-                # Delete all previous warnings for this user
                 await delete_previous_warnings(chat.id, user.id, context)
                 
-                # Create inline keyboard with unmute button and channel link
                 keyboard = []
                 
-                # Add Unmute button
                 keyboard.append([
                     InlineKeyboardButton(
                         "✅ Unmute Me", 
@@ -324,16 +314,13 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
                 
-                # Try to get or create invite link for private channels
                 invite_link = None
                 try:
                     if channel_id and (not channel or channel.startswith('-')):
-                        # For private channels (ID only or ID with negative number)
                         chat_obj = await context.bot.get_chat(channel_id)
                         if chat_obj.invite_link:
                             invite_link = chat_obj.invite_link
                         else:
-                            # Create new invite link if none exists
                             invite_link_obj = await context.bot.create_chat_invite_link(
                                 chat_id=channel_id,
                                 creates_join_request=False,
@@ -343,15 +330,14 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.warning(f"Could not get/create invite link for channel: {e}")
                 
-                # Add Channel Join button if link is available
-                if channel and not channel.startswith('-'):  # Public channel
+                if channel and not channel.startswith('-'):
                     keyboard.append([
                         InlineKeyboardButton(
                             "🔗 Join Channel", 
                             url=f"https://t.me/{channel}"
                         )
                     ])
-                elif invite_link:  # Private channel with invite link
+                elif invite_link:
                     keyboard.append([
                         InlineKeyboardButton(
                             "🔗 Join Private Channel", 
@@ -361,7 +347,6 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
-                # Prepare channel display name
                 channel_display = ""
                 if channel and not channel.startswith('-'):
                     channel_display = f"@{channel}"
@@ -370,7 +355,6 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     channel_display = "the required channel"
                 
-                # Send message with buttons
                 warning_msg = await update.message.reply_text(
                     f"⚠️ {user.mention_html()} has been muted for 5 minutes.\n"
                     f"Reason: Not joined {channel_display}\n\n"
@@ -379,17 +363,14 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=reply_markup
                 )
                 
-                # Store the new warning message ID
                 if 'user_warnings' not in context.chat_data:
                     context.chat_data['user_warnings'] = {}
                 
-                # Initialize as list if not already
                 if user.id not in context.chat_data['user_warnings']:
                     context.chat_data['user_warnings'][user.id] = []
                 elif not isinstance(context.chat_data['user_warnings'][user.id], list):
                     context.chat_data['user_warnings'][user.id] = [context.chat_data['user_warnings'][user.id]]
                 
-                # Add new message ID
                 context.chat_data['user_warnings'][user.id].append(warning_msg.message_id)
                 
             except Exception as mute_error:
@@ -409,7 +390,6 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Parse callback data: format "unmute:{chat_id}:{user_id}"
     data = query.data.split(':')
     if len(data) != 3 or data[0] != 'unmute':
         await query.edit_message_text("⚠️ Invalid request. Please try again later.")
@@ -418,13 +398,11 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = int(data[1])
     user_id = int(data[2])
     
-    # Verify the user clicking is the muted user
     if query.from_user.id != user_id:
         await query.answer("❌ This button is only for the muted user!", show_alert=True)
         return
     
     try:
-        # Get channel information from MongoDB
         fsub_data = fsub_collection.find_one({'chat_id': chat_id})
         if not fsub_data:
             await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
@@ -433,14 +411,12 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel = fsub_data.get('channel')
         channel_id = fsub_data.get('channel_id')
         
-        # Determine channel identifier to use
         target_chat = channel_id if channel_id else (f"@{channel}" if channel and not channel.startswith('-') else channel)
         
         if not target_chat:
             await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
             return
         
-        # Verify user has joined the channel
         try:
             chat_member = await context.bot.get_chat_member(target_chat, user_id)
             if chat_member.status in ['left', 'kicked']:
@@ -457,10 +433,8 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Get the chat
         chat = await context.bot.get_chat(chat_id)
         
-        # Restore full permissions
         permissions = ChatPermissions(
             can_send_messages=True,
             can_send_audios=True,
@@ -474,19 +448,15 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_add_web_page_previews=True
         )
         
-        # Unmute the user
         await chat.restrict_member(user_id, permissions)
         
-        # Delete all warning messages for this user
         await delete_previous_warnings(chat_id, user_id, context)
         
-        # Update the callback message
         await query.edit_message_text(
             f"✅ {query.from_user.mention_html()} has been unmuted!",
             parse_mode='HTML'
         )
         
-        # Notify in the group
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
@@ -500,30 +470,24 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if user is owner
     if str(update.effective_user.id) != os.getenv('OWNER_ID'):
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
 
-    # Calculate uptime
     uptime_seconds = time.time() - BOT_START_TIME
-    uptime = str(datetime.timedelta(seconds=int(uptime_seconds)))
+    uptime = str(timedelta(seconds=int(uptime_seconds)))
     
-    # Get groups count
     groups_count = fsub_collection.count_documents({})
-    
-    # Get bot info
+    users_count = user_collection.count_documents({})
     bot_info = await context.bot.get_me()
-    
-    # Get MongoDB status
     mongo_status = "Connected" if mongo_client.server_info() else "Disconnected"
     
-    # Prepare status message
     status_text = (
         f"🤖 *Bot Status Report*\n\n"
         f"• Bot Name: [{bot_info.full_name}](t.me/{bot_info.username})\n"
         f"• Uptime: `{uptime}`\n"
         f"• Groups Using: `{groups_count}`\n"
+        f"• Users Tracked: `{users_count}`\n"
         f"• MongoDB: `{mongo_status}`\n\n"
         f"📊 *System Stats*\n"
         f"• Python Version: `{os.sys.version.split()[0]}`\n"
@@ -537,87 +501,144 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if user is owner
     if str(update.effective_user.id) != os.getenv('OWNER_ID'):
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
 
-    # Check if message is replied to
     if not update.message.reply_to_message:
         await update.message.reply_text("ℹ️ Please reply to a message to broadcast it.")
         return
 
-    # Get all group IDs
-    group_ids = fsub_collection.distinct("chat_id")
-    total_groups = len(group_ids)
+    context.user_data['broadcast_msg'] = {
+        'chat_id': update.message.reply_to_message.chat_id,
+        'message_id': update.message.reply_to_message.message_id
+    }
+
+    keyboard = [
+        [InlineKeyboardButton("📢 Groups Only", callback_data="bcast_target:groups")],
+        [InlineKeyboardButton("👤 Users Only", callback_data="bcast_target:users")],
+        [InlineKeyboardButton("🌐 Both Groups & Users", callback_data="bcast_target:both")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if total_groups == 0:
-        await update.message.reply_text("ℹ️ No groups to broadcast to.")
+    await update.message.reply_text(
+        "🔍 Select broadcast target:",
+        reply_markup=reply_markup
+    )
+
+async def broadcast_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    target = query.data.split(':')[1]
+    context.user_data['broadcast_target'] = target
+    
+    keyboard = [
+        [InlineKeyboardButton("📌 Yes", callback_data="bcast_pin:yes")],
+        [InlineKeyboardButton("❌ No", callback_data="bcast_pin:no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📌 Pin message in groups?",
+        reply_markup=reply_markup
+    )
+
+async def broadcast_pin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pin_option = query.data.split(':')[1]
+    context.user_data['broadcast_pin'] = pin_option
+    
+    msg_info = context.user_data['broadcast_msg']
+    target = context.user_data['broadcast_target']
+    
+    del context.user_data['broadcast_msg']
+    del context.user_data['broadcast_target']
+    del context.user_data['broadcast_pin']
+    
+    recipients = []
+    
+    if target in ['groups', 'both']:
+        groups = fsub_collection.distinct("chat_id")
+        recipients.extend([('group', gid) for gid in groups])
+    
+    if target in ['users', 'both']:
+        users = user_collection.distinct("user_id")
+        recipients.extend([('user', uid) for uid in users])
+    
+    total = len(recipients)
+    if total == 0:
+        await query.edit_message_text("❌ No recipients found for broadcast.")
         return
+
+    progress_msg = await query.edit_message_text(
+        f"📢 Broadcasting to {total} recipients...\n"
+        f"• Sent: 0\n"
+        f"• Failed: 0"
+    )
 
     successful = 0
     failed = 0
     failed_ids = []
     
-    # Send broadcast with progress
-    progress_msg = await update.message.reply_text(
-        f"📢 Starting broadcast to {total_groups} groups...\n"
-        f"• Sent: 0\n"
-        f"• Failed: 0"
-    )
-    
-    for i, chat_id in enumerate(group_ids):
+    for idx, (recipient_type, recipient_id) in enumerate(recipients):
         try:
-            await context.bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=update.message.reply_to_message.chat_id,
-                message_id=update.message.reply_to_message.message_id
+            sent_msg = await context.bot.copy_message(
+                chat_id=recipient_id,
+                from_chat_id=msg_info['chat_id'],
+                message_id=msg_info['message_id']
             )
+            
+            if recipient_type == 'group' and pin_option == 'yes':
+                try:
+                    await context.bot.pin_chat_message(
+                        chat_id=recipient_id,
+                        message_id=sent_msg.message_id
+                    )
+                except Exception as pin_error:
+                    logger.error(f"Pin failed in {recipient_id}: {pin_error}")
+            
             successful += 1
         except Exception as e:
-            logger.error(f"Broadcast failed to {chat_id}: {e}")
+            logger.error(f"Broadcast failed to {recipient_type} {recipient_id}: {e}")
             failed += 1
-            failed_ids.append(chat_id)
+            failed_ids.append(recipient_id)
         
-        # Update progress every 10 messages or at the end
-        if (i+1) % 10 == 0 or (i+1) == total_groups:
+        if (idx + 1) % 10 == 0 or (idx + 1) == total:
             try:
                 await progress_msg.edit_text(
-                    f"📢 Broadcasting to {total_groups} groups...\n"
+                    f"📢 Broadcasting to {total} recipients...\n"
                     f"• Sent: {successful}\n"
                     f"• Failed: {failed}\n"
-                    f"• Progress: {i+1}/{total_groups} ({((i+1)/total_groups)*100:.1f}%)"
+                    f"• Progress: {idx+1}/{total} ({((idx+1)/total)*100:.1f}%)"
                 )
             except Exception as e:
-                logger.error(f"Error updating progress message: {e}")
+                logger.error(f"Progress update failed: {e}")
     
-    # Prepare final report
     report_text = (
         f"✅ Broadcast completed!\n\n"
-        f"• Total groups: {total_groups}\n"
+        f"• Total recipients: {total}\n"
         f"• Successful: {successful}\n"
         f"• Failed: {failed}"
     )
     
-    # Add failed IDs if any
     if failed > 0:
-        report_text += f"\n\n❌ Failed IDs:\n{', '.join(map(str, failed_ids[:20]))}"
-        if failed > 20:
-            report_text += f"\n... and {failed-20} more"
+        report_text += f"\n\n❌ Failed IDs:\n{', '.join(map(str, failed_ids[:10]))}"
+        if failed > 10:
+            report_text += f"\n... and {failed-10} more"
     
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+        chat_id=query.message.chat_id,
         text=report_text
     )
 
 def main():
-    # Start Flask server in a separate thread
     Thread(target=run_flask, daemon=True).start()
     
-    # Create Telegram bot
     application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
     
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("fsub", set_fsub_channel))
@@ -627,8 +648,9 @@ def main():
         MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, check_membership)
     )
     application.add_handler(CallbackQueryHandler(unmute_button, pattern=r"^unmute:"))
+    application.add_handler(CallbackQueryHandler(broadcast_target_callback, pattern=r"^bcast_target:"))
+    application.add_handler(CallbackQueryHandler(broadcast_pin_callback, pattern=r"^bcast_pin:"))
     
-    # Start polling
     application.run_polling()
 
 if __name__ == '__main__':
