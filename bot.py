@@ -150,7 +150,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/start - Introduction\n"
         "/help - This message\n"
-        "/fsub [@channel|ID|reply] - Set required channel\n\n"
+        "/fsub [@channel|ID|reply] - Set required channel\n"
+        "/disconnect - Stop forcing subscription\n\n"
         "I'll mute anyone who hasn't joined the required channel for 5 minutes.",
         reply_markup=reply_markup
     )
@@ -233,6 +234,37 @@ async def save_fsub_channel(chat_id: int, channel: str, update: Update, context:
             "2. I'm a member of the channel\n"
             "3. You provided a valid channel identifier"
         )
+
+async def disconnect_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat.type == 'private':
+        await update.message.reply_text("This command only works in groups.")
+        return
+    
+    member = await chat.get_member(user.id)
+    if member.status not in ['administrator', 'creator']:
+        await update.message.reply_text("❌ Only admins can use this command.")
+        return
+    
+    # Check if fsub is already set for this group
+    fsub_data = fsub_collection.find_one({'chat_id': chat.id})
+    if not fsub_data:
+        await update.message.reply_text("❌ No forced subscription is currently active in this group.")
+        return
+    
+    # Remove the fsub entry from database
+    result = fsub_collection.delete_one({'chat_id': chat.id})
+    
+    if result.deleted_count > 0:
+        await update.message.reply_text(
+            "✅ Force subscription has been disabled for this group.\n\n"
+            "Users will no longer be required to join any channel to participate.\n\n"
+            "You can enable it again anytime using `/fsub` command."
+        )
+    else:
+        await update.message.reply_text("❌ Failed to disable force subscription. Please try again.")
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
@@ -642,6 +674,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("fsub", set_fsub_channel))
+    application.add_handler(CommandHandler("disconnect", disconnect_fsub))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(
