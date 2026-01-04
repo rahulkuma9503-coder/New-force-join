@@ -467,20 +467,24 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # User has joined the channel. Now reduce their restriction to 5 seconds
+        # User has joined the channel. Now remove them from exception list completely
         try:
             chat = await context.bot.get_chat(chat_id)
             
-            # Send message: "Please wait 5 seconds, unmuting..."
+            # Send message: "Please wait, removing from restrictions..."
             wait_msg = await query.edit_message_text(
                 f"✅ Membership verified!\n"
-                f"⏳ Please wait 5 seconds, unmuting...",
+                f"⏳ Removing you from restriction list...",
                 parse_mode='HTML'
             )
             
-            # Set restriction for only 5 seconds (still muted)
-            short_permissions = ChatPermissions(
-                can_send_messages=False,  # Still muted
+            # Create a time 1 second AGO (in the past)
+            # This is the key: set restriction to expire in the PAST
+            past_time = datetime.now() - timedelta(seconds=1)
+            
+            # Create ANY permissions (doesn't matter because it will expire immediately)
+            permissions = ChatPermissions(
+                can_send_messages=False,  # Still muted during this "instant"
                 can_send_audios=False,
                 can_send_documents=False,
                 can_send_photos=False,
@@ -492,42 +496,42 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_add_web_page_previews=False
             )
             
-            # Set until_date to 5 seconds from now
-            short_until_date = datetime.now() + timedelta(seconds=5)
-            
+            # Apply restriction with PAST until_date - this immediately expires the restriction
             await chat.restrict_member(
                 user_id, 
-                short_permissions,
-                until_date=short_until_date
+                permissions,
+                until_date=past_time
             )
             
-            logger.info(f"Reduced restriction to 5 seconds for user {user_id} in chat {chat_id}")
+            logger.info(f"Set restriction with past until_date for user {user_id} in chat {chat_id}")
             
-            # Wait 5 seconds and then send unmute confirmation
-            await asyncio.sleep(5)
+            # Wait a moment for Telegram to process
+            await asyncio.sleep(1)
             
-            # After 5 seconds, the restriction will expire automatically
-            # Send confirmation message
+            # Now send confirmation that user is removed from exception list
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ {query.from_user.mention_html()} has been unmuted!\n"
-                     f"Your restrictions have expired naturally.",
+                text=f"✅ {query.from_user.mention_html()} has been removed from restriction list!\n"
+                     f"You are no longer in the exception list.",
                 parse_mode='HTML'
             )
             
             # Delete the wait message
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=wait_msg.message_id
-            )
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=wait_msg.message_id
+                )
+            except Exception as delete_error:
+                logger.warning(f"Could not delete wait message: {delete_error}")
             
             # Also delete the original warning message
             await delete_previous_warnings(chat_id, user_id, context)
             
         except Exception as restrict_error:
-            logger.error(f"Error reducing restriction: {restrict_error}")
+            logger.error(f"Error removing from exception list: {restrict_error}")
             await query.answer(
-                "⚠️ Failed to reduce restriction. Please contact an admin.",
+                "⚠️ Failed to remove from restriction list. Please contact an admin.",
                 show_alert=True
             )
             return
@@ -535,7 +539,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in unmute_button: {e}")
         await query.answer(
-            "⚠️ Failed to process unmute request. Please try again later.",
+            "⚠️ Failed to process request. Please try again later.",
             show_alert=True
         )
 
