@@ -46,6 +46,9 @@ def run_flask():
 # Global variables for bot stats
 BOT_START_TIME = time.time()
 
+# Store temporary unmute messages for cleanup
+temp_unmute_messages = {}
+
 async def delete_previous_warnings(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Delete all previous warning messages for a user"""
     if 'user_warnings' not in context.chat_data:
@@ -327,20 +330,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             try:
-                # Use a SHORT mute duration and store the unmute time in database
                 mute_duration = 300  # 5 minutes in seconds
                 until_date = datetime.now() + timedelta(seconds=mute_duration)
-                
-                # Store mute info in database for auto-cleanup
-                user_collection.update_one(
-                    {'user_id': user.id, 'chat_id': chat.id},
-                    {'$set': {
-                        'muted_until': until_date,
-                        'muted_at': datetime.now(),
-                        'auto_unmute': True
-                    }},
-                    upsert=True
-                )
                 
                 await chat.restrict_member(
                     user.id, 
@@ -462,6 +453,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
             return
         
+        # First check if user has joined the channel
         try:
             chat_member = await context.bot.get_chat_member(target_chat, user_id)
             if chat_member.status in ['left', 'kicked']:
@@ -478,115 +470,68 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # CRITICAL FIX: Remove user from exception list completely
-        # The key is to use a PAST until_date to expire the restriction immediately
+        # User has joined the channel. Now we'll reduce their restriction to 5 seconds
         
+        # Step 1: Send "Please wait 5 seconds" message
+        wait_msg = await query.edit_message_text(
+            f"✅ {query.from_user.mention_html()} has joined the channel!\n"
+            f"⏳ Please wait 5 seconds while I remove your restrictions...",
+            parse_mode='HTML'
+        )
+        
+        # Store the wait message for cleanup
+        temp_unmute_messages[f"{chat_id}:{user_id}"] = wait_msg.message_id
+        
+        # Step 2: Set a VERY SHORT restriction (5 seconds) to let it expire naturally
         try:
-            # Get chat object
             chat = await context.bot.get_chat(chat_id)
             
-            # Check user's current status
+            # Set restriction for only 5 seconds
+            short_permissions = ChatPermissions(
+                can_send_messages=False,  # Still muted for 5 seconds
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            )
+            
+            # Set until_date to 5 seconds from now
+            short_until_date = datetime.now() + timedelta(seconds=5)
+            
+            await chat.restrict_member(
+                user_id, 
+                short_permissions,
+                until_date=short_until_date
+            )
+            
+            # Log this action
+            logger.info(f"Set 5-second restriction for user {user_id} in chat {chat_id}")
+            
+        except Exception as restrict_error:
+            logger.error(f"Error setting short restriction: {restrict_error}")
+            # Continue anyway - we'll still try to clean up
+        
+        # Step 3: Wait 5 seconds and then completely remove restrictions
+        await asyncio.sleep(5)
+        
+        try:
+            # After 5 seconds, the restriction should have expired
+            # But we'll explicitly set full permissions to be sure
+            
+            # Get chat again
+            chat = await context.bot.get_chat(chat_id)
+            
+            # Check if user is still restricted
             user_member = await chat.get_member(user_id)
             
             if user_member.status == 'restricted':
-                # User is still restricted, we need to COMPLETELY remove the restriction
-                
-                # Method 1: Set restriction with a PAST until_date (immediately expires)
-                try:
-                    # Create a time 1 second in the past
-                    past_time = datetime.now() - timedelta(seconds=10)
-                    
-                    # Set FULL permissions with past until_date
-                    permissions = ChatPermissions(
-                        can_send_messages=True,
-                        can_send_audios=True,
-                        can_send_documents=True,
-                        can_send_photos=True,
-                        can_send_videos=True,
-                        can_send_video_notes=True,
-                        can_send_voice_notes=True,
-                        can_send_polls=True,
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True
-                    )
-                    
-                    # Apply with past until_date - this should immediately expire the restriction
-                    await chat.restrict_member(user_id, permissions, until_date=past_time)
-                    logger.info(f"Applied past until_date restriction for user {user_id} in chat {chat_id}")
-                    
-                    # Small delay to let Telegram process
-                    await asyncio.sleep(0.5)
-                    
-                except Exception as past_error:
-                    logger.warning(f"Past until_date method failed: {past_error}")
-                    
-                    # Method 2: Try to use promote_chat_member to reset status
-                    try:
-                        await context.bot.promote_chat_member(
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            can_send_messages=True,
-                            can_send_media_messages=True,
-                            can_send_polls=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True,
-                            can_change_info=False,
-                            can_invite_users=False,
-                            can_pin_messages=False,
-                            can_post_messages=False,
-                            can_edit_messages=False,
-                            can_delete_messages=False,
-                            can_restrict_members=False,
-                            can_promote_members=False,
-                            can_manage_chat=False,
-                            can_manage_video_chats=False,
-                            can_manage_topics=False
-                        )
-                        logger.info(f"Used promote_chat_member to reset user {user_id} status")
-                        
-                        # Immediately demote back
-                        await context.bot.promote_chat_member(
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            can_send_messages=True,
-                            can_send_media_messages=True,
-                            can_send_polls=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True,
-                            can_change_info=False,
-                            can_invite_users=False,
-                            can_pin_messages=False,
-                            can_post_messages=False,
-                            can_edit_messages=False,
-                            can_delete_messages=False,
-                            can_restrict_members=False,
-                            can_promote_members=False,
-                            can_manage_chat=False,
-                            can_manage_video_chats=False,
-                            can_manage_topics=False
-                        )
-                        
-                    except Exception as promote_error:
-                        logger.error(f"Promote method also failed: {promote_error}")
-                        
-                        # Method 3: Last resort - set full permissions without until_date
-                        permissions = ChatPermissions(
-                            can_send_messages=True,
-                            can_send_audios=True,
-                            can_send_documents=True,
-                            can_send_photos=True,
-                            can_send_videos=True,
-                            can_send_video_notes=True,
-                            can_send_voice_notes=True,
-                            can_send_polls=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True
-                        )
-                        await chat.restrict_member(user_id, permissions)
-            
-            else:
-                # User is not restricted, just set full permissions
-                permissions = ChatPermissions(
+                # User is still restricted, set full permissions
+                full_permissions = ChatPermissions(
                     can_send_messages=True,
                     can_send_audios=True,
                     can_send_documents=True,
@@ -598,117 +543,98 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     can_send_other_messages=True,
                     can_add_web_page_previews=True
                 )
-                await chat.restrict_member(user_id, permissions)
                 
-        except Exception as unmute_error:
-            logger.error(f"Unmute error: {unmute_error}")
+                # Apply WITHOUT until_date to clear any time-based restrictions
+                await chat.restrict_member(user_id, full_permissions)
+                logger.info(f"Applied full permissions after 5-second wait for user {user_id}")
             
-            # Final fallback: Simple permissions
+            # User should now be completely unrestricted
+            
+        except Exception as final_error:
+            logger.error(f"Error in final unmute step: {final_error}")
+            # Try one more approach
             try:
                 chat = await context.bot.get_chat(chat_id)
-                permissions = ChatPermissions(
+                basic_perms = ChatPermissions(
                     can_send_messages=True,
                     can_send_media_messages=True,
                     can_send_polls=True,
                     can_send_other_messages=True,
                     can_add_web_page_previews=True
                 )
-                await chat.restrict_member(user_id, permissions)
-            except Exception as final_error:
-                logger.error(f"Final unmute attempt failed: {final_error}")
-                await query.answer(
-                    "⚠️ Failed to unmute. Please contact an admin.",
-                    show_alert=True
-                )
-                return
+                await chat.restrict_member(user_id, basic_perms)
+            except Exception as e:
+                logger.error(f"Fallback unmute also failed: {e}")
         
-        # IMPORTANT: Remove the mute record from database to prevent auto-unmute confusion
-        user_collection.update_one(
-            {'user_id': user_id, 'chat_id': chat_id},
-            {'$set': {
-                'auto_unmute': False,
-                'manually_unmuted': True,
-                'unmuted_at': datetime.now()
-            }}
-        )
+        # Step 4: Clean up the wait message
+        try:
+            # Delete the wait message
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=wait_msg.message_id
+            )
+            
+            # Remove from temp storage
+            temp_unmute_messages.pop(f"{chat_id}:{user_id}", None)
+            
+        except Exception as delete_error:
+            logger.error(f"Could not delete wait message: {delete_error}")
         
-        # Delete previous warning messages
-        await delete_previous_warnings(chat_id, user_id, context)
-        
-        # Edit the callback query message
-        await query.edit_message_text(
-            f"✅ {query.from_user.mention_html()} has been unmuted and removed from restrictions!",
-            parse_mode='HTML'
-        )
-        
-        # Send notification to the group
-        await context.bot.send_message(
+        # Step 5: Send final unmute confirmation
+        final_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
+            text=f"✅ {query.from_user.mention_html()} has been completely unmuted!\n"
+                 f"You can now participate in this group.",
             parse_mode='HTML'
         )
+        
+        # Store this message to delete later
+        if 'user_warnings' not in context.chat_data:
+            context.chat_data['user_warnings'] = {}
+        
+        if user_id not in context.chat_data['user_warnings']:
+            context.chat_data['user_warnings'][user_id] = []
+        
+        context.chat_data['user_warnings'][user_id].append(final_msg.message_id)
+        
+        # Schedule cleanup of the final message after 10 seconds
+        asyncio.create_task(delete_message_after_delay(
+            context.bot, chat_id, final_msg.message_id, 10
+        ))
+        
+        # Also delete any previous warning messages
+        await delete_previous_warnings(chat_id, user_id, context)
         
     except Exception as e:
         logger.error(f"Error in unmute_button: {e}")
-        await query.answer(
-            "⚠️ Failed to unmute. Please contact an admin.",
-            show_alert=True
-        )
+        try:
+            await query.answer(
+                "⚠️ Failed to unmute. Please contact an admin.",
+                show_alert=True
+            )
+        except:
+            pass
 
-async def cleanup_expired_mutes(context: ContextTypes.DEFAULT_TYPE):
-    """Background job to cleanup expired mutes and remove users from exception list"""
+async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: int):
+    """Delete a message after a delay"""
+    await asyncio.sleep(delay)
     try:
-        # Find users whose mute has expired but might still be in exception list
-        expired_users = user_collection.find({
-            'muted_until': {'$lt': datetime.now()},
-            'auto_unmute': True,
-            'manually_unmuted': {'$ne': True}
-        })
-        
-        for user_data in expired_users:
-            user_id = user_data.get('user_id')
-            chat_id = user_data.get('chat_id')
-            
-            if not user_id or not chat_id:
-                continue
-            
-            try:
-                # Try to get chat and user member
-                chat = await context.bot.get_chat(chat_id)
-                user_member = await chat.get_member(user_id)
-                
-                if user_member.status == 'restricted':
-                    # User is still restricted even though mute expired
-                    # Remove them from exception list using past until_date
-                    past_time = datetime.now() - timedelta(seconds=10)
-                    
-                    permissions = ChatPermissions(
-                        can_send_messages=True,
-                        can_send_audios=True,
-                        can_send_documents=True,
-                        can_send_photos=True,
-                        can_send_videos=True,
-                        can_send_video_notes=True,
-                        can_send_voice_notes=True,
-                        can_send_polls=True,
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True
-                    )
-                    
-                    await chat.restrict_member(user_id, permissions, until_date=past_time)
-                    logger.info(f"Auto-cleaned expired mute for user {user_id} in chat {chat_id}")
-                
-                # Mark as cleaned up
-                user_collection.update_one(
-                    {'_id': user_data['_id']},
-                    {'$set': {'auto_cleaned': True}}
-                )
-                
-            except Exception as e:
-                logger.error(f"Error cleaning up user {user_id} in chat {chat_id}: {e}")
-                
+        await bot.delete_message(
+            chat_id=chat_id,
+            message_id=message_id
+        )
     except Exception as e:
-        logger.error(f"Error in cleanup_expired_mutes: {e}")
+        logger.warning(f"Could not delete message {message_id} after delay: {e}")
+
+async def cleanup_temp_messages(context: ContextTypes.DEFAULT_TYPE):
+    """Cleanup any lingering temp unmute messages"""
+    try:
+        current_time = time.time()
+        # We could add timestamp tracking for messages, but for now just log
+        if temp_unmute_messages:
+            logger.info(f"Temp unmute messages in memory: {len(temp_unmute_messages)}")
+    except Exception as e:
+        logger.error(f"Error in cleanup_temp_messages: {e}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != os.getenv('OWNER_ID'):
@@ -723,8 +649,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Count currently muted users
     muted_users = user_collection.count_documents({
-        'muted_until': {'$gt': datetime.now()},
-        'auto_unmute': True
+        'muted_until': {'$gt': datetime.now()}
     })
     
     bot_info = await context.bot.get_me()
@@ -888,11 +813,10 @@ def main():
     
     application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
     
-    # Add job queue for cleanup
+    # Add cleanup job for temp messages (runs every 30 minutes)
     job_queue = application.job_queue
     if job_queue:
-        # Run cleanup every 5 minutes
-        job_queue.run_repeating(cleanup_expired_mutes, interval=300, first=10)
+        job_queue.run_repeating(cleanup_temp_messages, interval=1800, first=60)
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
