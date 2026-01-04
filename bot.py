@@ -467,7 +467,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # User has joined the channel. Now reduce their restriction to 5 seconds
+        # User has joined the channel. Now reduce restriction to 5 seconds
         try:
             chat = await context.bot.get_chat(chat_id)
             
@@ -478,54 +478,71 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML'
             )
             
-            # Set restriction for only 5 seconds (still muted)
-            short_permissions = ChatPermissions(
-                can_send_messages=False,  # Still muted
-                can_send_audios=False,
-                can_send_documents=False,
-                can_send_photos=False,
-                can_send_videos=False,
-                can_send_video_notes=False,
-                can_send_voice_notes=False,
-                can_send_polls=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False
-            )
+            # IMPORTANT: Apply a NEW restriction that expires in 5 seconds
+            # This will override the old restriction
             
-            # Set until_date to 5 seconds from now
+            # Create a time 5 seconds from now
             short_until_date = datetime.now() + timedelta(seconds=5)
             
-            await chat.restrict_member(
-                user_id, 
-                short_permissions,
-                until_date=short_until_date
+            # Apply RESTRICTION with 5-second expiration
+            # The user remains muted during these 5 seconds
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_media_messages=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False,
+                    can_send_polls=False
+                ),
+                until_date=int(short_until_date.timestamp())  # Convert to Unix timestamp
             )
             
-            logger.info(f"Reduced restriction to 5 seconds for user {user_id} in chat {chat_id}")
+            logger.info(f"✅ Set 5-second restriction for user {user_id} in chat {chat_id}")
             
-            # Wait 5 seconds and then send unmute confirmation
+            # Wait 5 seconds
             await asyncio.sleep(5)
             
-            # After 5 seconds, the restriction will expire automatically
+            # After 5 seconds, the restriction will expire naturally
+            # User will be automatically removed from exception list
+            
             # Send confirmation message
-            await context.bot.send_message(
+            final_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"✅ {query.from_user.mention_html()} has been unmuted!\n"
-                     f"Your restrictions have expired naturally.",
+                     f"The restriction has expired naturally.",
                 parse_mode='HTML'
             )
             
             # Delete the wait message
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=wait_msg.message_id
-            )
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=wait_msg.message_id
+                )
+            except Exception as delete_error:
+                logger.warning(f"Could not delete wait message: {delete_error}")
             
             # Also delete the original warning message
             await delete_previous_warnings(chat_id, user_id, context)
             
+            # Store final message for cleanup
+            if 'user_warnings' not in context.chat_data:
+                context.chat_data['user_warnings'] = {}
+            
+            if user_id not in context.chat_data['user_warnings']:
+                context.chat_data['user_warnings'][user_id] = []
+            
+            context.chat_data['user_warnings'][user_id].append(final_msg.message_id)
+            
+            # Schedule cleanup of the final message after 10 seconds
+            asyncio.create_task(delete_message_after_delay(
+                context.bot, chat_id, final_msg.message_id, 10
+            ))
+            
         except Exception as restrict_error:
-            logger.error(f"Error reducing restriction: {restrict_error}")
+            logger.error(f"❌ Error reducing restriction: {restrict_error}")
             await query.answer(
                 "⚠️ Failed to reduce restriction. Please contact an admin.",
                 show_alert=True
@@ -538,6 +555,17 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Failed to process unmute request. Please try again later.",
             show_alert=True
         )
+
+async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: int):
+    """Delete a message after a delay"""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(
+            chat_id=chat_id,
+            message_id=message_id
+        )
+    except Exception as e:
+        logger.warning(f"Could not delete message {message_id} after delay: {e}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != os.getenv('OWNER_ID'):
