@@ -449,6 +449,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Configuration error. Please contact admin.", show_alert=True)
             return
         
+        # Verify user joined the channel
         try:
             chat_member = await context.bot.get_chat_member(target_chat, user_id)
             if chat_member.status in ['left', 'kicked']:
@@ -465,35 +466,33 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Get chat object
         chat = await context.bot.get_chat(chat_id)
         
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
+        # CRITICAL FIX: Remove user from exceptions list completely
+        # Use permissions=None and until_date=0 to fully remove restrictions
+        await chat.restrict_member(
+            user_id=user_id,
+            permissions=None,  # Inherit default group permissions (removes exception)
+            until_date=0       # Expire restriction immediately
         )
         
-        await chat.restrict_member(user_id, permissions)
-        
+        # Delete warning messages
         await delete_previous_warnings(chat_id, user_id, context)
         
+        # Edit the button message
         await query.edit_message_text(
             f"✅ {query.from_user.mention_html()} has been unmuted!",
             parse_mode='HTML'
         )
         
+        # Notify the group
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
             parse_mode='HTML'
         )
+        
     except Exception as e:
         logger.error(f"Error unmuting user: {e}")
         await query.answer(
