@@ -465,62 +465,116 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Get chat info
         chat = await context.bot.get_chat(chat_id)
         
-        # Create FULL permissions object to completely remove restrictions
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        )
-        
-        # FIRST: Apply full permissions WITHOUT until_date to clear time-based restrictions
-        await chat.restrict_member(user_id, permissions)
-        
-        # SECOND: Use promote_chat_member as an alternative method to ensure all restrictions are removed
-        # This doesn't actually promote to admin, but can clear restrictions
+        # METHOD 1: First, try to use promote_chat_member to reset all permissions
+        # This is the most reliable way to ensure all restrictions are removed
         try:
             await context.bot.promote_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
+                # Set ALL message permissions to True
                 can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                # Set all admin permissions to False (we're not making them admin)
+                can_send_media_messages=True,  # Covers: stickers, GIFs, photos, videos, documents, audio
+                can_send_polls=True,
+                can_send_other_messages=True,  # Covers: voice messages, video notes, etc.
+                can_add_web_page_previews=True,  # Covers: embed links
+                # Set admin permissions appropriately:
+                # For regular users, these should be False
                 can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+                # Set other admin permissions to False (not needed for regular users)
                 can_post_messages=False,
                 can_edit_messages=False,
                 can_delete_messages=False,
-                can_invite_users=False,
                 can_restrict_members=False,
-                can_pin_messages=False,
                 can_promote_members=False,
                 can_manage_chat=False,
                 can_manage_video_chats=False,
                 can_manage_topics=False
             )
+            logger.info(f"Successfully used promote_chat_member to unmute user {user_id} in chat {chat_id}")
+            
         except Exception as promote_error:
-            # This is okay, the restrict with full permissions should be enough
-            logger.debug(f"Promote not needed or failed: {promote_error}")
+            logger.warning(f"promote_chat_member failed: {promote_error}. Trying restrict_member method...")
+            
+            # METHOD 2: Fallback - Use restrict_member with full permissions
+            try:
+                # Create FULL permissions object
+                permissions = ChatPermissions(
+                    # All message permissions enabled
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True
+                )
+                
+                # Apply without until_date to clear time-based restrictions
+                await chat.restrict_member(user_id, permissions)
+                logger.info(f"Successfully used restrict_member to unmute user {user_id} in chat {chat_id}")
+                
+            except Exception as restrict_error:
+                logger.error(f"Both unmute methods failed: {restrict_error}")
+                await query.answer(
+                    "⚠️ Failed to unmute. Please contact an admin.",
+                    show_alert=True
+                )
+                return
         
-        # THIRD: Delete previous warning messages
+        # METHOD 3: Additional cleanup - Check if user is still restricted and fix if needed
+        try:
+            # Check user's current status
+            user_member = await chat.get_member(user_id)
+            
+            if user_member.status == 'restricted':
+                # User is still restricted, try one more approach
+                logger.info(f"User {user_id} is still restricted after unmute attempt. Trying additional fix...")
+                
+                # Try to get chat's default permissions and apply them
+                try:
+                    # Get chat info which includes permissions
+                    chat_info = await context.bot.get_chat(chat_id)
+                    
+                    # If chat has permissions field, use them
+                    if hasattr(chat_info, 'permissions') and chat_info.permissions:
+                        await chat.restrict_member(user_id, chat_info.permissions)
+                        logger.info(f"Applied chat default permissions to user {user_id}")
+                    else:
+                        # Create default permissions
+                        default_perms = ChatPermissions(
+                            can_send_messages=True,
+                            can_send_media_messages=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_change_info=False,
+                            can_invite_users=False,
+                            can_pin_messages=False
+                        )
+                        await chat.restrict_member(user_id, default_perms)
+                except Exception as perm_error:
+                    logger.error(f"Failed to apply default permissions: {perm_error}")
+        except Exception as cleanup_error:
+            logger.warning(f"Cleanup step error (non-critical): {cleanup_error}")
+        
+        # Delete previous warning messages
         await delete_previous_warnings(chat_id, user_id, context)
         
-        # FOURTH: Edit the callback query message
+        # Edit the callback query message
         await query.edit_message_text(
-            f"✅ {query.from_user.mention_html()} has been unmuted!",
+            f"✅ {query.from_user.mention_html()} has been unmuted with ALL permissions restored!",
             parse_mode='HTML'
         )
         
-        # FIFTH: Send notification to the group
+        # Send notification to the group
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
@@ -528,25 +582,26 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     except Exception as e:
-        logger.error(f"Error unmuting user: {e}")
-        # Fallback: Try a simpler approach
+        logger.error(f"Error in unmute_button: {e}")
+        # Final fallback: Try a basic unmute
         try:
-            fallback_permissions = ChatPermissions(
+            basic_perms = ChatPermissions(
                 can_send_messages=True,
                 can_send_media_messages=True,
+                can_send_polls=True,
                 can_send_other_messages=True,
                 can_add_web_page_previews=True
             )
             chat = await context.bot.get_chat(chat_id)
-            await chat.restrict_member(user_id, fallback_permissions)
+            await chat.restrict_member(user_id, basic_perms)
             
             await query.edit_message_text(
                 f"✅ {query.from_user.mention_html()} has been unmuted!",
                 parse_mode='HTML'
             )
             
-        except Exception as fallback_error:
-            logger.error(f"Fallback unmute also failed: {fallback_error}")
+        except Exception as final_error:
+            logger.error(f"All unmute attempts failed: {final_error}")
             await query.answer(
                 "⚠️ Failed to unmute. Please contact an admin.",
                 show_alert=True
