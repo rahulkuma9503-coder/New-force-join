@@ -326,8 +326,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             try:
-                mute_duration = 5 * 60
-                until_date = int(time.time()) + mute_duration
+                mute_duration = 300  # 5 minutes in seconds
+                until_date = datetime.now() + timedelta(seconds=mute_duration)
                 
                 await chat.restrict_member(
                     user.id, 
@@ -467,6 +467,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         chat = await context.bot.get_chat(chat_id)
         
+        # Create FULL permissions object to completely remove restrictions
         permissions = ChatPermissions(
             can_send_messages=True,
             can_send_audios=True,
@@ -480,26 +481,76 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_add_web_page_previews=True
         )
         
+        # FIRST: Apply full permissions WITHOUT until_date to clear time-based restrictions
         await chat.restrict_member(user_id, permissions)
         
+        # SECOND: Use promote_chat_member as an alternative method to ensure all restrictions are removed
+        # This doesn't actually promote to admin, but can clear restrictions
+        try:
+            await context.bot.promote_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                # Set all admin permissions to False (we're not making them admin)
+                can_change_info=False,
+                can_post_messages=False,
+                can_edit_messages=False,
+                can_delete_messages=False,
+                can_invite_users=False,
+                can_restrict_members=False,
+                can_pin_messages=False,
+                can_promote_members=False,
+                can_manage_chat=False,
+                can_manage_video_chats=False,
+                can_manage_topics=False
+            )
+        except Exception as promote_error:
+            # This is okay, the restrict with full permissions should be enough
+            logger.debug(f"Promote not needed or failed: {promote_error}")
+        
+        # THIRD: Delete previous warning messages
         await delete_previous_warnings(chat_id, user_id, context)
         
+        # FOURTH: Edit the callback query message
         await query.edit_message_text(
             f"✅ {query.from_user.mention_html()} has been unmuted!",
             parse_mode='HTML'
         )
         
+        # FIFTH: Send notification to the group
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ {query.from_user.mention_html()} has been unmuted after verifying channel membership.",
             parse_mode='HTML'
         )
+        
     except Exception as e:
         logger.error(f"Error unmuting user: {e}")
-        await query.answer(
-            "⚠️ Failed to unmute. Please contact an admin.",
-            show_alert=True
-        )
+        # Fallback: Try a simpler approach
+        try:
+            fallback_permissions = ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+            chat = await context.bot.get_chat(chat_id)
+            await chat.restrict_member(user_id, fallback_permissions)
+            
+            await query.edit_message_text(
+                f"✅ {query.from_user.mention_html()} has been unmuted!",
+                parse_mode='HTML'
+            )
+            
+        except Exception as fallback_error:
+            logger.error(f"Fallback unmute also failed: {fallback_error}")
+            await query.answer(
+                "⚠️ Failed to unmute. Please contact an admin.",
+                show_alert=True
+            )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != os.getenv('OWNER_ID'):
