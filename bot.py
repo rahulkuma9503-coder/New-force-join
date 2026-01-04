@@ -467,47 +467,32 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # User has joined the channel. Now remove them from exception list
+        # User has joined the channel. Now completely remove them from restriction list
         try:
             chat = await context.bot.get_chat(chat_id)
             
-            # Send message: "Please wait, removing from restrictions..."
+            # Send message: "Unmuting..."
             wait_msg = await query.edit_message_text(
                 f"✅ Membership verified!\n"
-                f"⏳ Removing you from restriction list...",
+                f"⏳ Unmuting...",
                 parse_mode='HTML'
             )
             
-            # METHOD 1: Set restriction WITHOUT until_date (removes time-based restriction)
+            # Method 1: Set permissions to None (unrestrict completely)
             try:
-                # Get the current restrictions for the user to maintain same permissions
-                # but without until_date
-                permissions = ChatPermissions(
-                    can_send_messages=False,  # Still muted
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False
+                # First try to use restrict_member with None permissions (if supported)
+                await context.bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    permissions=None
                 )
-                
-                # Apply restriction WITHOUT until_date - this removes the timer
-                await chat.restrict_member(user_id, permissions)
-                logger.info(f"Applied restriction without until_date for user {user_id}")
-                
-            except Exception as method1_error:
-                logger.error(f"Method 1 failed: {method1_error}")
-                
-                # METHOD 2: Try setting user as admin with no permissions (removes restriction)
+                logger.info(f"Completely unrestricted user {user_id} in chat {chat_id} using None permissions")
+            except Exception as e1:
+                # If that fails, try Method 2: Use promoteChatMember to remove restrictions
                 try:
                     await context.bot.promote_chat_member(
                         chat_id=chat_id,
                         user_id=user_id,
-                        # Set all permissions to False (no admin rights)
                         can_change_info=False,
                         can_post_messages=False,
                         can_edit_messages=False,
@@ -518,118 +503,64 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         can_promote_members=False,
                         can_manage_chat=False,
                         can_manage_video_chats=False,
-                        can_manage_topics=False,
-                        # Message permissions (set to False to keep muted)
-                        can_send_messages=False,
-                        can_send_media_messages=False,
-                        can_send_polls=False,
-                        can_send_other_messages=False,
-                        can_add_web_page_previews=False
+                        can_manage_voice_chats=False
                     )
-                    logger.info(f"Used promote_chat_member to remove restriction for user {user_id}")
-                    
-                    # Immediately "demote" back by setting same permissions
-                    await context.bot.promote_chat_member(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        can_change_info=False,
-                        can_post_messages=False,
-                        can_edit_messages=False,
-                        can_delete_messages=False,
-                        can_invite_users=False,
-                        can_restrict_members=False,
-                        can_pin_messages=False,
-                        can_promote_members=False,
-                        can_manage_chat=False,
-                        can_manage_video_chats=False,
-                        can_manage_topics=False,
-                        can_send_messages=False,
-                        can_send_media_messages=False,
-                        can_send_polls=False,
-                        can_send_other_messages=False,
-                        can_add_web_page_previews=False
-                    )
-                    
-                except Exception as method2_error:
-                    logger.error(f"Method 2 failed: {method2_error}")
-                    
-                    # METHOD 3: Try to get chat permissions and apply them
+                    logger.info(f"Removed restrictions for user {user_id} in chat {chat_id} using promote_chat_member")
+                except Exception as e2:
+                    # If both fail, try Method 3: Set minimal restrictions with past date
                     try:
-                        # Get chat info which might have default permissions
-                        chat_info = await context.bot.get_chat(chat_id)
-                        
-                        # Try to apply whatever permissions we can get
-                        permissions = ChatPermissions(
-                            can_send_messages=False,
-                            can_send_media_messages=False,
-                            can_send_polls=False,
-                            can_send_other_messages=False,
-                            can_add_web_page_previews=False
+                        # Set permissions to very permissive and with past date
+                        full_permissions = ChatPermissions(
+                            can_send_messages=True,
+                            can_send_audios=True,
+                            can_send_documents=True,
+                            can_send_photos=True,
+                            can_send_videos=True,
+                            can_send_video_notes=True,
+                            can_send_voice_notes=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True
                         )
-                        await chat.restrict_member(user_id, permissions)
                         
-                    except Exception as method3_error:
-                        logger.error(f"Method 3 failed: {method3_error}")
+                        # Set until_date to past to remove restriction
+                        until_date = datetime.now() - timedelta(seconds=1)
+                        
+                        await chat.restrict_member(
+                            user_id, 
+                            full_permissions,
+                            until_date=until_date
+                        )
+                        logger.info(f"Removed restrictions for user {user_id} using past until_date")
+                    except Exception as e3:
+                        logger.error(f"All unmute methods failed: {e1}, {e2}, {e3}")
                         await query.answer(
                             "⚠️ Failed to remove restrictions. Please contact an admin.",
                             show_alert=True
                         )
                         return
             
-            # Wait a moment for Telegram to process
-            await asyncio.sleep(1)
-            
-            # Now check user status and send appropriate message
-            try:
-                # Check user's current status
-                user_member = await chat.get_member(user_id)
-                
-                if user_member.status == 'restricted':
-                    # User is still restricted but without time limit
-                    confirmation_msg = (
-                        f"✅ {query.from_user.mention_html()} has been removed from timed restriction!\n"
-                        f"🔒 You are still muted but no longer in the exception list with a timer."
-                    )
-                else:
-                    # User is no longer restricted
-                    confirmation_msg = (
-                        f"✅ {query.from_user.mention_html()} has been completely removed from restrictions!\n"
-                        f"🎉 You are no longer in the exception list."
-                    )
-                
-                # Send confirmation
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=confirmation_msg,
-                    parse_mode='HTML'
-                )
-                
-            except Exception as status_error:
-                logger.error(f"Error checking user status: {status_error}")
-                # Send generic confirmation
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✅ {query.from_user.mention_html()} has been processed!\n"
-                         f"Please wait a moment for changes to take effect.",
-                    parse_mode='HTML'
-                )
+            # Send confirmation message
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ {query.from_user.mention_html()} has been unmuted!\n"
+                     f"Welcome to the group!",
+                parse_mode='HTML'
+            )
             
             # Delete the wait message
-            try:
-                await context.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=wait_msg.message_id
-                )
-            except Exception as delete_error:
-                logger.warning(f"Could not delete wait message: {delete_error}")
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=wait_msg.message_id
+            )
             
             # Also delete the original warning message
             await delete_previous_warnings(chat_id, user_id, context)
             
-        except Exception as restrict_error:
-            logger.error(f"Error in unmute process: {restrict_error}")
+        except Exception as unmute_error:
+            logger.error(f"Error unmuting user: {unmute_error}")
             await query.answer(
-                "⚠️ Failed to process unmute request. Please contact an admin.",
+                "⚠️ Failed to unmute. Please contact an admin.",
                 show_alert=True
             )
             return
@@ -637,7 +568,7 @@ async def unmute_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in unmute_button: {e}")
         await query.answer(
-            "⚠️ Failed to process request. Please try again later.",
+            "⚠️ Failed to process unmute request. Please try again later.",
             show_alert=True
         )
 
